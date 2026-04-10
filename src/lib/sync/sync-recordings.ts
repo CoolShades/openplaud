@@ -108,8 +108,15 @@ async function processRecording(
         );
 
         const fileExtension = "mp3";
-        const safeName = plaudRecording.filename.replace(/[/\\:*?"<>|]/g, "-").trim() || plaudRecording.id;
-        const storageKey = await uniqueStorageKey(context.userId, safeName, fileExtension, plaudRecording.id);
+        const safeName =
+            plaudRecording.filename.replace(/[/\\:*?"<>|]/g, "-").trim() ||
+            plaudRecording.id;
+        const storageKey = await uniqueStorageKey(
+            context.userId,
+            safeName,
+            fileExtension,
+            plaudRecording.id,
+        );
         const contentType = "audio/mpeg";
         await storage.uploadFile(storageKey, audioBuffer, contentType);
 

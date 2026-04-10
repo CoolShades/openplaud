@@ -1,9 +1,5 @@
 import { and, eq } from "drizzle-orm";
 import { OpenAI } from "openai";
-import type {
-    TranscriptionDiarized,
-    TranscriptionVerbose,
-} from "openai/resources/audio/transcriptions";
 import { db } from "@/db";
 import {
     apiCredentials,
@@ -16,6 +12,10 @@ import { generateTitleFromTranscription } from "@/lib/ai/generate-title";
 import { decrypt } from "@/lib/encryption";
 import { createPlaudClient } from "@/lib/plaud/client";
 import { createUserStorageProvider } from "@/lib/storage/factory";
+import {
+    getResponseFormat,
+    parseTranscriptionResponse,
+} from "@/lib/transcription/format";
 
 export async function transcribeRecording(
     userId: string,
@@ -98,15 +98,7 @@ export async function transcribeRecording(
 
         const model = credentials.defaultModel || "whisper-1";
 
-        const isGpt4o = model.startsWith("gpt-4o");
-        const supportsDiarizedJson =
-            model.includes("diarize") || model.includes("diarized");
-
-        const responseFormat = supportsDiarizedJson
-            ? ("diarized_json" as const)
-            : isGpt4o
-              ? ("json" as const)
-              : ("verbose_json" as const);
+        const responseFormat = getResponseFormat(model);
 
         const transcription = await openai.audio.transcriptions.create({
             file: audioFile,
@@ -115,25 +107,8 @@ export async function transcribeRecording(
             ...(defaultLanguage ? { language: defaultLanguage } : {}),
         });
 
-        let transcriptionText: string;
-        let detectedLanguage: string | null = null;
-
-        if (supportsDiarizedJson) {
-            const diarized = transcription as TranscriptionDiarized;
-            transcriptionText = (diarized.segments ?? [])
-                .map((seg) => `${seg.speaker}: ${seg.text}`)
-                .join("\n");
-            // TranscriptionDiarized doesn't expose language
-        } else if (responseFormat === "verbose_json") {
-            const verbose = transcription as TranscriptionVerbose;
-            transcriptionText = verbose.text;
-            detectedLanguage = verbose.language ?? null;
-        } else {
-            transcriptionText =
-                typeof transcription === "string"
-                    ? transcription
-                    : (transcription.text ?? "");
-        }
+        const { text: transcriptionText, detectedLanguage } =
+            parseTranscriptionResponse(transcription, responseFormat);
 
         if (existingTranscription) {
             await db

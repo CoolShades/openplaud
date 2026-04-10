@@ -6,6 +6,10 @@ import { apiCredentials, recordings, transcriptions } from "@/db/schema";
 import { auth } from "@/lib/auth";
 import { decrypt } from "@/lib/encryption";
 import { createUserStorageProvider } from "@/lib/storage/factory";
+import {
+    getResponseFormat,
+    parseTranscriptionResponse,
+} from "@/lib/transcription/format";
 
 export async function POST(
     request: Request,
@@ -24,6 +28,9 @@ export async function POST(
         }
 
         const { id } = await params;
+        const body = await request.json().catch(() => ({}));
+        const overrideProviderId = body.providerId as string | undefined;
+        const overrideModel = body.model as string | undefined;
 
         const [recording] = await db
             .select()
@@ -44,16 +51,28 @@ export async function POST(
         }
 
         // Get user's transcription API credentials
-        const [credentials] = await db
-            .select()
-            .from(apiCredentials)
-            .where(
-                and(
-                    eq(apiCredentials.userId, session.user.id),
-                    eq(apiCredentials.isDefaultTranscription, true),
-                ),
-            )
-            .limit(1);
+        // If a specific provider was requested, look it up by ID
+        const [credentials] = overrideProviderId
+            ? await db
+                  .select()
+                  .from(apiCredentials)
+                  .where(
+                      and(
+                          eq(apiCredentials.id, overrideProviderId),
+                          eq(apiCredentials.userId, session.user.id),
+                      ),
+                  )
+                  .limit(1)
+            : await db
+                  .select()
+                  .from(apiCredentials)
+                  .where(
+                      and(
+                          eq(apiCredentials.userId, session.user.id),
+                          eq(apiCredentials.isDefaultTranscription, true),
+                      ),
+                  )
+                  .limit(1);
 
         if (!credentials) {
             return NextResponse.json(
@@ -85,46 +104,35 @@ export async function POST(
             header[2] === 0x67 &&
             header[3] === 0x53; // "OggS"
 
-        const ext = isOgg ? "ogg" : recording.storagePath.split(".").pop() || "mp3";
-        const contentType = isOgg ? "audio/ogg" : recording.storagePath.endsWith(".mp3")
-            ? "audio/mpeg"
-            : "audio/opus";
+        const ext = isOgg
+            ? "ogg"
+            : recording.storagePath.split(".").pop() || "mp3";
+        const contentType = isOgg
+            ? "audio/ogg"
+            : recording.storagePath.endsWith(".mp3")
+              ? "audio/mpeg"
+              : "audio/opus";
 
         // Ensure filename has a valid extension so the API can detect the format
         const filename = recording.filename.match(/\.\w{2,4}$/)
             ? recording.filename
             : `${recording.filename}.${ext}`;
 
-        const audioFile = new File(
-            [new Uint8Array(audioBuffer)],
-            filename,
-            {
-                type: contentType,
-            },
-        );
-
-        // Transcribe with verbose JSON to get language detection
-        const transcription = await openai.audio.transcriptions.create({
-            file: audioFile,
-            model: credentials.defaultModel || "whisper-1",
-            response_format: "verbose_json",
+        const audioFile = new File([new Uint8Array(audioBuffer)], filename, {
+            type: contentType,
         });
 
-        type VerboseTranscription = {
-            text: string;
-            language?: string | null;
-        };
+        const model = overrideModel || credentials.defaultModel || "whisper-1";
+        const responseFormat = getResponseFormat(model);
 
-        // Extract text and detected language from response
-        const transcriptionText =
-            typeof transcription === "string"
-                ? transcription
-                : (transcription as VerboseTranscription).text;
+        const transcription = await openai.audio.transcriptions.create({
+            file: audioFile,
+            model,
+            response_format: responseFormat,
+        });
 
-        const detectedLanguage =
-            typeof transcription === "string"
-                ? null
-                : (transcription as VerboseTranscription).language || null;
+        const { text: transcriptionText, detectedLanguage } =
+            parseTranscriptionResponse(transcription, responseFormat);
 
         // Save transcription
         const [existingTranscription] = await db
@@ -141,7 +149,7 @@ export async function POST(
                     detectedLanguage,
                     transcriptionType: "server",
                     provider: credentials.provider,
-                    model: credentials.defaultModel || "whisper-1",
+                    model,
                 })
                 .where(eq(transcriptions.id, existingTranscription.id));
         } else {
@@ -152,7 +160,7 @@ export async function POST(
                 detectedLanguage,
                 transcriptionType: "server",
                 provider: credentials.provider,
-                model: credentials.defaultModel || "whisper-1",
+                model,
             });
         }
 

@@ -192,23 +192,30 @@ export const transcriptions = pgTable(
 );
 
 // AI Enhancements
-export const aiEnhancements = pgTable("ai_enhancements", {
-    id: text("id")
-        .primaryKey()
-        .$defaultFn(() => nanoid()),
-    recordingId: text("recording_id")
-        .notNull()
-        .references(() => recordings.id, { onDelete: "cascade" }),
-    userId: text("user_id")
-        .notNull()
-        .references(() => users.id, { onDelete: "cascade" }),
-    summary: text("summary"),
-    actionItems: jsonb("action_items"), // Array of action items
-    keyPoints: jsonb("key_points"), // Array of key points
-    provider: varchar("provider", { length: 100 }).notNull(), // e.g., 'openai', 'anthropic-via-openrouter'
-    model: varchar("model", { length: 100 }).notNull(), // e.g., 'gpt-4o', 'claude-3.5-sonnet'
-    createdAt: timestamp("created_at").notNull().defaultNow(),
-});
+export const aiEnhancements = pgTable(
+    "ai_enhancements",
+    {
+        id: text("id")
+            .primaryKey()
+            .$defaultFn(() => nanoid()),
+        recordingId: text("recording_id")
+            .notNull()
+            .references(() => recordings.id, { onDelete: "cascade" }),
+        userId: text("user_id")
+            .notNull()
+            .references(() => users.id, { onDelete: "cascade" }),
+        summary: text("summary"),
+        actionItems: jsonb("action_items"), // Array of action items
+        keyPoints: jsonb("key_points"), // Array of key points
+        provider: varchar("provider", { length: 100 }).notNull(), // e.g., 'openai', 'anthropic-via-openrouter'
+        model: varchar("model", { length: 100 }).notNull(), // e.g., 'gpt-4o', 'claude-3.5-sonnet'
+        createdAt: timestamp("created_at").notNull().defaultNow(),
+    },
+    (table) => ({
+        // Each user can have at most one enhancement per recording
+        userRecordingUnique: unique().on(table.recordingId, table.userId),
+    }),
+);
 
 // API Credentials (encrypted)
 export const apiCredentials = pgTable("api_credentials", {
@@ -323,6 +330,8 @@ export const userSettings = pgTable("user_settings", {
     syncTitleToPlaud: boolean("sync_title_to_plaud").notNull().default(false),
     // Title generation prompt configuration
     titleGenerationPrompt: jsonb("title_generation_prompt"), // { preset: string, customPrompt?: string }
+    // Summary prompt configuration
+    summaryPrompt: jsonb("summary_prompt"), // { selectedPrompt: string, customPrompts: CustomPrompt[] }
     createdAt: timestamp("created_at").notNull().defaultNow(),
     updatedAt: timestamp("updated_at").notNull().defaultNow(),
 });
