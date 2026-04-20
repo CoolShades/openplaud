@@ -5,6 +5,8 @@ import { recordings } from "@/db/schema";
 import { auth } from "@/lib/auth";
 import { createUserStorageProvider } from "@/lib/storage/factory";
 
+const SIGNED_URL_EXPIRY_SECONDS = 3600;
+
 export async function GET(
     request: Request,
     { params }: { params: Promise<{ id: string }> },
@@ -41,13 +43,23 @@ export async function GET(
             );
         }
 
-        // Get storage provider
         const storage = await createUserStorageProvider(session.user.id);
 
-        // Download file
+        // For object stores (S3/B2/R2/MinIO), redirect the browser to a signed
+        // URL so range requests hit the bucket directly. This avoids buffering
+        // the whole file into the pod's memory on every scrub — which used to
+        // OOM/rate-limit for multi-hour recordings.
+        const signedUrl = await storage.getSignedUrl(
+            recording.storagePath,
+            SIGNED_URL_EXPIRY_SECONDS,
+        );
+        if (/^https?:\/\//.test(signedUrl)) {
+            return NextResponse.redirect(signedUrl, 302);
+        }
+
+        // Local-storage fallback: stream from disk with Range support.
         const audioBuffer = await storage.downloadFile(recording.storagePath);
 
-        // Determine content type from file extension
         const getContentType = (path: string): string => {
             if (path.endsWith(".mp3")) return "audio/mpeg";
             if (path.endsWith(".opus")) return "audio/opus";
@@ -55,18 +67,14 @@ export async function GET(
             if (path.endsWith(".m4a")) return "audio/mp4";
             if (path.endsWith(".ogg")) return "audio/ogg";
             if (path.endsWith(".webm")) return "audio/webm";
-            // Default to mpeg for unknown types (as most Plaud recordings are MP3)
             return "audio/mpeg";
         };
 
         const contentType = getContentType(recording.storagePath);
         const fileSize = audioBuffer.length;
-
-        // Parse Range header for seeking support
         const rangeHeader = request.headers.get("range");
 
         if (rangeHeader) {
-            // Parse range header (e.g., "bytes=0-1023" or "bytes=1024-")
             const rangeMatch = rangeHeader.match(/bytes=(\d+)-(\d*)/);
 
             if (rangeMatch) {
@@ -75,7 +83,6 @@ export async function GET(
                     ? parseInt(rangeMatch[2], 10)
                     : fileSize - 1;
 
-                // Validate range values
                 if (
                     start < 0 ||
                     start >= fileSize ||
@@ -83,7 +90,6 @@ export async function GET(
                     end >= fileSize ||
                     start > end
                 ) {
-                    // Return 416 Range Not Satisfiable
                     return new NextResponse(null, {
                         status: 416,
                         headers: {
@@ -93,11 +99,8 @@ export async function GET(
                 }
 
                 const chunkSize = end - start + 1;
-
-                // Extract the requested chunk
                 const chunk = audioBuffer.slice(start, end + 1);
 
-                // Return 206 Partial Content
                 return new NextResponse(new Uint8Array(chunk), {
                     status: 206,
                     headers: {
@@ -111,7 +114,6 @@ export async function GET(
             }
         }
 
-        // No range requested - return full file
         return new NextResponse(new Uint8Array(audioBuffer), {
             headers: {
                 "Content-Type": contentType,
